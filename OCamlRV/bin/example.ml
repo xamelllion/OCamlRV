@@ -3,11 +3,12 @@ let rec list_iter l n =
   then ()
   else (
     match l with
-    | [] -> ()
-    | [ x ] -> print_int x
     | x :: xs ->
       let () = print_int x in
       list_iter xs (n - 1))
 ;;
 
 list_iter [ 1; 2; 3; 4; 5 ] 5
+let rec ones = 1 :: 2 :: 3 :: 4 :: ones;;
+
+(* list_iter ones 10 *)

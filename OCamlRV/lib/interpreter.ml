@@ -19,12 +19,14 @@ and value =
   | VString of string
   | VUnit
   | VList of value list
+  | VSeq of value Seq.t
   | VTuple of value list
   | VNil
   | VOption of value option
   | VFun of pattern * rec_flag * expression * environment
   | VMutualFun of pattern * rec_flag * expression * environment
   | VFunction of case * case list * environment
+  | VCycle of string
   | VBuiltin of builtin * string
 
 let rec pp_value ppf =
@@ -34,12 +36,14 @@ let rec pp_value ppf =
   | VBool b -> fprintf ppf "%b" b
   | VString s -> fprintf ppf "%s" s
   | VUnit -> fprintf ppf "()"
+  (* | VList _ -> fprintf ppf "<VList>" *)
+  | VSeq _ -> fprintf ppf "<VSeq>"
   | VList vl ->
-    fprintf
-      ppf
-      "[%a]"
-      (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf "; ") pp_value)
-      vl
+     fprintf
+     ppf
+     "[%a]"
+     (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf "; ") pp_value)
+     vl
   | VTuple vl ->
     fprintf
       ppf
@@ -51,6 +55,7 @@ let rec pp_value ppf =
   | VBuiltin (_, name) -> fprintf ppf "<builtin> %s" name
   | VMutualFun _ -> fprintf ppf "<VMutualFun>"
   | VFunction _ -> fprintf ppf "<VFunction>"
+  | VCycle s -> fprintf ppf "<cycle> %s" s
   | VOption vo ->
     (match vo with
      | Some v -> fprintf ppf "Some %a" pp_value v
@@ -121,6 +126,18 @@ module Env (M : MONAD_FAIL) = struct
   ;;
 end
 
+let get_next_from_seq seq =
+  match Seq.uncons seq with
+  | Some (head, tail) ->
+      (* Printf.printf "Head: %d\n" head; *)
+      (* tail — это оставшаяся последовательность *)
+      let next_seq = tail in
+      (* Получаем следующий элемент *)
+      (match Seq.uncons next_seq with
+      | Some (next_head, _) ->  Some (head, next_head)
+      | None -> None)
+  | None -> None
+
 module Eval (M : MONAD_FAIL) = struct
   open M
   open Env (M)
@@ -151,6 +168,7 @@ module Eval (M : MONAD_FAIL) = struct
        | _ -> None)
     | PList (p1, rest), VList vl ->
       let pl = p1 :: rest in
+      (* let _ = Format.printf "%d %d\n" (List.length pl) (List.length vl) in *)
       let env =
         Base.List.fold2
           pl
@@ -164,11 +182,41 @@ module Eval (M : MONAD_FAIL) = struct
       (match env with
        | Ok env -> env
        | _ -> None)
+    (* | PList (p1, rest), VSeq seq ->
+      let rec seq_to_list seq =
+        match seq () with
+        | Seq.Nil -> []
+        | Seq.Cons (x, next) -> x :: seq_to_list next in
+      let pl = p1 :: rest in
+      let seq_l = Seq.take (List.length pl) seq in
+      (* let _ = Format.printf "%d %d\n" (List.length pl) (List.length (seq_to_list seq_l)) in *)
+      let env =
+        Base.List.fold2
+          pl
+          (seq_to_list seq_l)
+          ~f:(fun env p v ->
+            match env with
+            | Some e -> check_matching e (p, v)
+            | None -> None)
+          ~init:(Some env)
+      in
+      (match env with
+        | Ok env -> env
+        | _ -> None) *)
     | PCons (p1, p2), VList (v :: vl) ->
       let env = check_matching env (p2, VList vl) in
       (match env with
        | Some env -> check_matching env (p1, v)
        | None -> None)
+    | PCons (p1, p2), VSeq seq ->
+      let _ = print_endline "here" in
+      let b = get_next_from_seq seq in
+      (match b with
+        | Some (h, t) -> let env = check_matching env (p2, t) in
+          (match env with
+            | Some env -> check_matching env (p1, h)
+            | None -> let _ = print_endline "here1" in None)
+        | None -> None)
     | POption None, VOption None -> Some env
     | POption (Some p), VOption (Some v) ->
       let env = check_matching env (p, v) in
@@ -282,12 +330,13 @@ module Eval (M : MONAD_FAIL) = struct
       eval_expr env2 e
     | ExprFun (p, e) -> return (VFun (p, NonRec, e, env))
     | ExprMatch (e, c, cl) ->
+      let _ = print_endline "match" in
       let* v = eval_expr env e in
       let rec match_helper env v = function
         | (p, e) :: tl ->
           let env' = check_matching env (p, v) in
           (match env' with
-           | Some env -> eval_expr env e
+           | Some env -> let _ = print_endline "eval" in eval_expr env e
            | None -> match_helper env v tl)
         | [] -> fail PatternMatchingFailed
       in
@@ -421,6 +470,38 @@ module Eval (M : MONAD_FAIL) = struct
             (match e with
              | ExprFun (p1, e1) ->
                return (extend env name (VMutualFun (p1, Rec, e1, env)))
+             | ExprCons _ ->
+               let env2 = extend env name (VCycle name) in
+               let* v = eval_expr env2 e in
+               let l =
+                 match v with
+                 | VList l -> l
+                 | _ -> exit 1
+               in
+               let _ = Format.fprintf Format.std_formatter "%a\n" pp_value v in
+               let seq = List.to_seq l in
+               (* let _ = print_int (Seq.length seq) in *)
+               let ccc = Seq.cycle seq in
+               (* https://stackoverflow.com/questions/26475516/how-do-i-write-a-function-to-create-a-circular-version-of-a-list-in-ocaml *)
+               let cycle l =
+                 if l = []
+                 then invalid_arg "cycle"
+                 else (
+                   let l' = List.map (fun x -> x) l in
+                   (* copy the list *)
+                   let rec aux = function
+                     | [] -> assert false
+                     | [ _ ] as lst ->
+                       (* find the last cons cell *)
+                       (* and set the last pointer to the beginning of the list *)
+                       Obj.set_field (Obj.repr lst) 1 (Obj.repr l')
+                     | _ :: t -> aux t
+                   in
+                   aux l';
+                   l')
+               in
+               let env3 = extend env2 name (VSeq seq) in
+               return env3
              | _ -> return env)
           | _ -> return env)
         ~init:(return env)
