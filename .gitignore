@@ -1,2 +1,7 @@
 _build
 .DS_Store
+_coverage
+/_esy
+/node_modules
+/esy.lock
+/.melange.eobjs
